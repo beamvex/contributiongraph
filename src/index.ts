@@ -1,62 +1,120 @@
 import * as d3 from 'd3';
+import { execFileSync } from 'node:child_process';
 import { JSDOM } from 'jsdom';
 import sharp from 'sharp';
 
-type NodeDatum = {
-  id: string;
-  group: number;
-  x?: number;
-  y?: number;
-  vx?: number;
-  vy?: number;
+type DayDatum = {
+  date: Date;
+  count: number;
+  inYear: boolean;
 };
 
-type LinkDatum = d3.SimulationLinkDatum<NodeDatum> & {
-  source: string | NodeDatum;
-  target: string | NodeDatum;
-  value: number;
+const usage = (): string => {
+  return [
+    'Usage:',
+    '  npm start -- <repoPath> <year> [outputPng]',
+    '',
+    'Example:',
+    '  npm start -- /path/to/repo 2024 contributions-2024.png',
+  ].join('\n');
+};
+
+const isValidYear = (year: number): boolean => {
+  return Number.isInteger(year) && year >= 1970 && year <= 2100;
+};
+
+const parseGitContributionCounts = (
+  repoPath: string,
+  year: number
+): Map<string, number> => {
+  const since = `${year}-01-01`;
+  const until = `${year}-12-31`;
+
+  const output = execFileSync(
+    'git',
+    [
+      '-C',
+      repoPath,
+      'log',
+      '--no-merges',
+      '--date=short',
+      '--pretty=%ad',
+      '--since',
+      since,
+      '--until',
+      until,
+    ],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+
+  const counts = new Map<string, number>();
+
+  for (const line of output.split(/\r?\n/)) {
+    const date = line.trim();
+    if (!date) continue;
+    counts.set(date, (counts.get(date) ?? 0) + 1);
+  }
+
+  return counts;
 };
 
 const main = async (): Promise<void> => {
-  const outPath = process.argv[2] ?? 'graph.png';
+  const repoPath = process.argv[2];
+  const yearStr = process.argv[3];
+  const outPath = process.argv[4] ?? 'graph.png';
 
-  const width = 900;
-  const height = 500;
+  if (!repoPath || !yearStr) {
+    console.error(usage());
+    process.exitCode = 1;
+    return;
+  }
 
-  const nodes: NodeDatum[] = [
-    { id: 'You', group: 1 },
-    { id: 'D3', group: 2 },
-    { id: 'jsdom', group: 2 },
-    { id: 'sharp', group: 2 },
-    { id: 'PNG', group: 3 },
-    { id: 'SVG', group: 3 },
-  ];
+  const year = Number(yearStr);
+  if (!isValidYear(year)) {
+    console.error(`Invalid year: ${yearStr}`);
+    console.error(usage());
+    process.exitCode = 1;
+    return;
+  }
 
-  const links: LinkDatum[] = [
-    { source: 'You', target: 'D3', value: 2 },
-    { source: 'D3', target: 'SVG', value: 3 },
-    { source: 'jsdom', target: 'SVG', value: 2 },
-    { source: 'SVG', target: 'sharp', value: 2 },
-    { source: 'sharp', target: 'PNG', value: 3 },
-    { source: 'You', target: 'jsdom', value: 1 },
-  ];
+  const cellSize = 12;
+  const cellGap = 3;
+  const step = cellSize + cellGap;
 
-  const simulation = d3
-    .forceSimulation<NodeDatum>(nodes)
-    .force(
-      'link',
-      d3
-        .forceLink<NodeDatum, LinkDatum>(links)
-        .id((d: NodeDatum) => d.id)
-        .distance((d: LinkDatum) => 70 + 25 * d.value)
-        .strength(0.6)
-    )
-    .force('charge', d3.forceManyBody().strength(-420))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide<NodeDatum>().radius(26))
-    .stop();
+  const margin = {
+    top: 60,
+    right: 24,
+    bottom: 24,
+    left: 52,
+  };
 
-  simulation.tick(300);
+  const countsByDate = parseGitContributionCounts(repoPath, year);
+
+  const yearStart = d3.timeDay.floor(new Date(year, 0, 1));
+  const yearEnd = d3.timeDay.floor(new Date(year + 1, 0, 1));
+
+  const start = d3.timeSunday.floor(yearStart);
+  const end = d3.timeSunday.ceil(yearEnd);
+
+  const days: DayDatum[] = d3.timeDay.range(start, end).map((date: Date) => {
+    const inYear = date >= yearStart && date < yearEnd;
+    const key = d3.timeFormat('%Y-%m-%d')(date);
+    const count = inYear ? (countsByDate.get(key) ?? 0) : 0;
+    return { date, count, inYear };
+  });
+
+  const weeks = d3.timeSunday.range(start, end);
+
+  const width = margin.left + weeks.length * step + margin.right;
+  const height = margin.top + 7 * step + margin.bottom;
+
+  const color = d3
+    .scaleThreshold<number, string>()
+    .domain([1, 4, 7, 11, 16])
+    .range(['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39', '#134a22']);
 
   const dom = new JSDOM('<!doctype html><html><body></body></html>');
   const document = dom.window.document;
@@ -68,83 +126,142 @@ const main = async (): Promise<void> => {
     .attr('width', width)
     .attr('height', height)
     .attr('viewBox', `0 0 ${width} ${height}`)
-    .style('background', '#0b1020');
-
-  const defs = svg.append('defs');
-  defs
-    .append('marker')
-    .attr('id', 'arrow')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 18)
-    .attr('refY', 0)
-    .attr('markerWidth', 6)
-    .attr('markerHeight', 6)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,-5L10,0L0,5')
-    .attr('fill', '#94a3b8');
+    .style('background', '#ffffff');
 
   svg
     .append('text')
-    .attr('x', 24)
-    .attr('y', 42)
-    .attr('fill', '#e2e8f0')
+    .attr('x', margin.left)
+    .attr('y', 34)
+    .attr('fill', '#0f172a')
     .attr(
       'font-family',
       'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
     )
-    .attr('font-size', 22)
+    .attr('font-size', 18)
     .attr('font-weight', 700)
-    .text('D3 Graph Rendered to PNG (Node)');
+    .text('GitHub-style Contributions');
 
-  const g = svg.append('g').attr('transform', 'translate(0, 10)');
-
-  g.append('g')
-    .attr('stroke', '#94a3b8')
-    .attr('stroke-opacity', 0.75)
-    .selectAll('line')
-    .data(links)
-    .join('line')
-    .attr('x1', (d: LinkDatum) => (d.source as NodeDatum).x ?? 0)
-    .attr('y1', (d: LinkDatum) => (d.source as NodeDatum).y ?? 0)
-    .attr('x2', (d: LinkDatum) => (d.target as NodeDatum).x ?? 0)
-    .attr('y2', (d: LinkDatum) => (d.target as NodeDatum).y ?? 0)
-    .attr('stroke-width', (d: LinkDatum) => Math.max(1, d.value))
-    .attr('marker-end', 'url(#arrow)');
-
-  const node = g
-    .append('g')
-    .selectAll('g')
-    .data(nodes)
-    .join('g')
-    .attr(
-      'transform',
-      (d: NodeDatum) => `translate(${d.x ?? width / 2}, ${d.y ?? height / 2})`
-    );
-
-  node
-    .append('circle')
-    .attr('r', (d: NodeDatum) => (d.id === 'You' ? 22 : 18))
-    .attr('fill', (d: NodeDatum) => {
-      if (d.group === 1) return '#22c55e';
-      if (d.group === 2) return '#60a5fa';
-      return '#f59e0b';
-    })
-    .attr('stroke', '#0f172a')
-    .attr('stroke-width', 3);
-
-  node
+  svg
     .append('text')
-    .attr('text-anchor', 'middle')
-    .attr('dy', 5)
-    .attr('fill', '#0b1020')
+    .attr('x', margin.left)
+    .attr('y', 54)
+    .attr('fill', '#475569')
     .attr(
       'font-family',
       'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
     )
     .attr('font-size', 12)
-    .attr('font-weight', 800)
-    .text((d: NodeDatum) => d.id);
+    .attr('font-weight', 500)
+    .text(String(year));
+
+  const grid = svg
+    .append('g')
+    .attr('transform', `translate(${margin.left}, ${margin.top})`);
+
+  const weekdayLabels = [
+    { label: 'Mon', day: 1 },
+    { label: 'Wed', day: 3 },
+    { label: 'Fri', day: 5 },
+  ];
+
+  grid
+    .append('g')
+    .selectAll('text')
+    .data(weekdayLabels)
+    .join('text')
+    .attr('x', -10)
+    .attr('y', d => d.day * step + cellSize - 2)
+    .attr('text-anchor', 'end')
+    .attr('fill', '#64748b')
+    .attr(
+      'font-family',
+      'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    )
+    .attr('font-size', 10)
+    .text(d => d.label);
+
+  const monthStarts = d3.timeMonth
+    .range(d3.timeMonth.floor(start), end)
+    .filter(d => d >= yearStart && d < yearEnd);
+
+  grid
+    .append('g')
+    .selectAll('text')
+    .data(monthStarts)
+    .join('text')
+    .attr('x', d => d3.timeSunday.count(start, d3.timeSunday.floor(d)) * step)
+    .attr('y', -10)
+    .attr('fill', '#64748b')
+    .attr(
+      'font-family',
+      'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    )
+    .attr('font-size', 10)
+    .text(d => d3.timeFormat('%b')(d));
+
+  grid
+    .append('g')
+    .selectAll('rect')
+    .data(days)
+    .join('rect')
+    .attr('width', cellSize)
+    .attr('height', cellSize)
+    .attr('rx', 2)
+    .attr('ry', 2)
+    .attr('x', (d: DayDatum) => d3.timeSunday.count(start, d.date) * step)
+    .attr('y', (d: DayDatum) => d.date.getDay() * step)
+    .attr('fill', (d: DayDatum) => (d.inYear ? color(d.count) : '#ffffff'))
+    .attr('stroke', (d: DayDatum) => (d.inYear ? '#e2e8f0' : 'none'))
+    .attr('stroke-width', (d: DayDatum) => (d.inYear ? 1 : 0));
+
+  const legend = svg
+    .append('g')
+    .attr(
+      'transform',
+      `translate(${margin.left}, ${margin.top + 7 * step + 14})`
+    );
+
+  legend
+    .append('text')
+    .attr('x', 0)
+    .attr('y', 10)
+    .attr('fill', '#64748b')
+    .attr(
+      'font-family',
+      'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    )
+    .attr('font-size', 10)
+    .text('Less');
+
+  const legendColors = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
+
+  legend
+    .append('g')
+    .attr('transform', 'translate(28, 0)')
+    .selectAll('rect')
+    .data(legendColors)
+    .join('rect')
+    .attr('x', (_d, i) => i * step)
+    .attr('y', 0)
+    .attr('width', cellSize)
+    .attr('height', cellSize)
+    .attr('rx', 2)
+    .attr('ry', 2)
+    .attr('fill', d => d)
+    .attr('stroke', '#e2e8f0')
+    .attr('stroke-width', 1);
+
+  legend
+    .append('text')
+    .attr('x', 28 + legendColors.length * step + 6)
+    .attr('y', 10)
+    .attr('fill', '#64748b')
+    .attr(
+      'font-family',
+      'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    )
+    .attr('font-size', 10)
+    .text('More');
 
   const svgString = document.body.innerHTML;
 
