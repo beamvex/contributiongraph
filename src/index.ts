@@ -129,6 +129,14 @@ const main = async (): Promise<void> => {
     .style('background', '#ffffff');
 
   svg
+    .append('rect')
+    .attr('x', 0)
+    .attr('y', 0)
+    .attr('width', width)
+    .attr('height', height)
+    .attr('fill', '#ffffff');
+
+  svg
     .append('text')
     .attr('x', margin.left)
     .attr('y', 34)
@@ -265,7 +273,10 @@ const main = async (): Promise<void> => {
 
   const svgString = document.body.innerHTML;
 
-  await sharp(Buffer.from(svgString)).png({ quality: 100 }).toFile(outPath);
+  await sharp(Buffer.from(svgString))
+    .flatten({ background: '#ffffff' })
+    .png({ quality: 100 })
+    .toFile(outPath);
 
   console.log(`Wrote ${outPath}`);
 };
